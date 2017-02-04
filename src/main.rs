@@ -1,4 +1,9 @@
 extern crate tg_botapi;
+extern crate rusqlite;
+
+use rusqlite::Connection;
+
+use std::path::Path;
 
 use tg_botapi::args;
 use tg_botapi::types;
@@ -54,9 +59,11 @@ fn main() {
                 if let Some(cmd) = split_text.next() {
                     match cmd {
                         "/start" | "/help" | "/about" | "/source" => {
-                                conn.execute("INSERT INTO person (name)
-                                              VALUES (?1)",
-                                             &[&me.name]).unwrap();
+                            if let Some(from) = message.from {
+                            conn.execute("INSERT OR IGNORE INTO users (id, name)
+                                          VALUES (?1, ?2)",
+                                          &[&from.id, &from.first_name]).unwrap();
+                            }
                             let _ = bot.send_message(&args::SendMessage::new(about)
                                 .chat_id(message.chat.id).parse_mode("HTML"));
                         }
