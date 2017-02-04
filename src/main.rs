@@ -26,6 +26,18 @@ fn main() {
                 Made by @JuanPotato, \
                 <a href=\"https://github.com/JuanPotato/PasteBot\">Source</a>";
 
+    let db_path = Path::new("./database.db");
+    let exists = db_path.exists();
+
+    let conn = Connection::open(db_path).unwrap();
+
+    if !exists {
+        conn.execute("CREATE TABLE users (
+                      id              INTEGER PRIMARY KEY,
+                      name            TEXT NOT NULL
+                      )", &[]).unwrap(); // Add more values later before actually making the bot public
+    }
+
     let mut update_args = args::GetUpdates::new().timeout(600).offset(0);
 
     'update_loop: loop {
@@ -42,6 +54,9 @@ fn main() {
                 if let Some(cmd) = split_text.next() {
                     match cmd {
                         "/start" | "/help" | "/about" | "/source" => {
+                                conn.execute("INSERT INTO person (name)
+                                              VALUES (?1)",
+                                             &[&me.name]).unwrap();
                             let _ = bot.send_message(&args::SendMessage::new(about)
                                 .chat_id(message.chat.id).parse_mode("HTML"));
                         }
