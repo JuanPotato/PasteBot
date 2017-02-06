@@ -1,5 +1,13 @@
+#[macro_use]
+extern crate serde_derive;
+
+extern crate serde_json;
 extern crate tg_botapi;
 extern crate rusqlite;
+extern crate crypto;
+
+use crypto::md5::Md5;
+use crypto::digest::Digest;
 
 use rusqlite::Connection;
 
@@ -7,11 +15,24 @@ use std::path::Path;
 
 use tg_botapi::args;
 use tg_botapi::types;
+use tg_botapi::types::InputMessageContent;
+use tg_botapi::types::InlineQueryResult;
+
 use tg_botapi::BotApi;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 // use std::thread;
 // use std::env;
+
+use serde_json::Value;
+use serde_json::Number;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Paste {
+    text: String,
+    uses: i64,
+}
 
 fn main() {
     let token = ""; // I'm lazy go away
@@ -37,10 +58,15 @@ fn main() {
     let conn = Connection::open(db_path).unwrap();
 
     if !exists {
-        conn.execute("CREATE TABLE users (
-                      id              INTEGER PRIMARY KEY,
-                      name            TEXT NOT NULL
-                      )", &[]).unwrap(); // Add more values later before actually making the bot public
+        conn.execute("
+            CREATE TABLE users (
+                id              INTEGER PRIMARY KEY,
+                pastes          STRING DEFAULT '[]',
+                state           INTEGER NOT NULL DEFAULT 0
+            )", &[]).unwrap();
+        // States
+        // 0 Nothing going on
+        // 1 User initiated /newpaste waiting for paste contents
     }
 
     let mut update_args = args::GetUpdates::new().timeout(600).offset(0);
@@ -52,64 +78,146 @@ fn main() {
             update_args.offset = Some(update.update_id + 1);
 
             if let Some(message) = update.message {
+                if let Some(from) = message.from { // This is getting nasty
 
-                let message_text = message.text.unwrap_or(String::new());
-                let mut split_text = message_text.split_whitespace();
+                    let message_text = message.text.unwrap_or(String::new());
+                    let mut split_text = message_text.split_whitespace();
 
-                if let Some(cmd) = split_text.next() {
-                    match cmd {
-                        "/start" | "/help" | "/about" | "/source" => {
-                            if let Some(from) = message.from {
-                            conn.execute("INSERT OR IGNORE INTO users (id, name)
-                                          VALUES (?1, ?2)",
-                                          &[&from.id, &from.first_name]).unwrap();
+                    if let Some(cmd) = split_text.next() {
+                        match cmd {
+                            "/start" | "/help" => {
+                                conn.execute("
+                                    INSERT OR IGNORE INTO users (id)
+                                    VALUES (?1)",
+                                    &[&from.id]).unwrap();
+
+                                let _ = bot.send_message(&args::SendMessage::new(about)
+                                    .chat_id(message.chat.id).parse_mode("HTML"));
                             }
-                            let _ = bot.send_message(&args::SendMessage::new(about)
-                                .chat_id(message.chat.id).parse_mode("HTML"));
-                        }
-                        "/newpaste" => {
+                            "/listpastes" => {
+                                let res_pastes: Result<String, _> = conn.query_row(
+                                    "SELECT pastes FROM users WHERE id=?1",
+                                    &[&from.id],
+                                    |row| {
+                                        row.get(0)
+                                    }
+                                );
 
-                        }
-                        _ => {
+                                match res_pastes {
+                                    Ok(str_pastes) => {
+                                        let pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
 
+                                    let _ = bot.send_message(&args::SendMessage
+                                        ::new(&serde_json::to_string(&pastes).unwrap())
+                                        .chat_id(message.chat.id));
+                                    }
+
+                                    Err(e) => {
+                                        // Oh shit waddup
+                                    }
+                                }
+                            }
+                            "/newpaste" => {
+                                conn.execute("
+                                    UPDATE users
+                                    SET state = 1
+                                    WHERE id=?1",
+                                    &[&from.id]).unwrap();
+
+                                let _ = bot.send_message(&args::SendMessage
+                                    ::new("Ok, send me the text you want that paste to be.")
+                                    .chat_id(message.chat.id));
+                            }
+                            _ => {
+                                let cur_state: Result<i64, _> = conn.query_row(
+                                    "SELECT state FROM users WHERE id=?1",
+                                    &[&from.id], |row| {
+                                        row.get(0)
+                                    }
+                                );
+
+                                match cur_state {
+                                    Ok(num) => {
+                                        match num {
+                                            1 => {
+                                                conn.execute("
+                                                    UPDATE users
+                                                    SET state = 0
+                                                    WHERE id=?1",
+                                                    &[&from.id]).unwrap();
+
+                                                let res_pastes: Result<String, _> = conn.query_row(
+                                                    "SELECT pastes FROM users WHERE id=?1",
+                                                    &[&from.id],
+                                                    |row| {
+                                                        row.get(0)
+                                                    }
+                                                );
+
+                                                match res_pastes {
+                                                    Ok(str_pastes) => {
+                                                        let mut pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
+                                                        pastes.push(Paste { text: message_text.to_string(), uses: 0 });
+                                                        conn.execute("
+                                                            UPDATE users
+                                                            SET pastes = ?2
+                                                            WHERE id=?1",
+                                                            &[&from.id, &serde_json::to_string(&pastes).unwrap()]).unwrap();
+
+                                                        let _ = bot.send_message(&args::SendMessage
+                                                            ::new("Added.")
+                                                            .chat_id(message.chat.id));
+                                                    }
+
+                                                    Err(e) => {
+                                                        // Oh shit waddup
+                                                    }
+                                                }
+                                            },
+
+                                            _ => { }
+                                        }
+                                    }
+
+                                    Err(e) => {
+                                        // Oh shit waddup
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
 
             if let Some(inline_query) = update.inline_query {
-                let lenny_txt = format!("{} {}", inline_query.query, "( ͡° ͜ʖ ͡°)");
-                let shrug_txt = format!("{} {}", inline_query.query, "¯\\_(ツ)_/¯");
-                let gnu_txt = 
-                    "I'd just like to interject for moment. What you're refering \
-                     to as Linux, is in fact, GNU/Linux, or as I've recently taken \
-                     to calling it, GNU plus Linux. Linux is not an operating system \
-                     unto itself, but rather another free component of a fully functioning \
-                     GNU system made useful by the GNU corelibs, shell utilities and vital \
-                     system components comprising a full OS as defined by POSIX.\n\n\
-                     Many computer users run a modified version of the GNU system every day, \
-                     without realizing it. Through a peculiar turn of events, the version of \
-                     GNU which is widely used today is often called Linux, and many of its \
-                     users are not aware that it is basically the GNU system, developed by \
-                     the GNU Project.\n\n\
-                     There really is a Linux, and these people are using it, but it is just \
-                     a part of the system they use. Linux is the kernel: the program in the \
-                     system that allocates the machine's resources to the other programs \
-                     that you run. The kernel is an essential part of an operating system, \
-                     but useless by itself; it can only function in the context of a complete \
-                     operating system. Linux is normally used in combination with the GNU \
-                     operating system: the whole system is basically GNU with Linux added, \
-                     or GNU/Linux. All the so-called Linux distributions are really \
-                     distributions of GNU/Linux!";
+                let res_pastes: Result<String, _> = conn.query_row(
+                    "SELECT pastes FROM users WHERE id=?1",
+                    &[&inline_query.from.id], |row| row.get(0));
 
-                let lenny = types::InputMessageContent::new_text(&lenny_txt);
-                let shrug = types::InputMessageContent::new_text(&shrug_txt);
-                let gnu = types::InputMessageContent::new_text(gnu_txt);
-                let results = &[types::InlineQueryResult::new_article("lenny", &lenny_txt, &lenny),
-                                types::InlineQueryResult::new_article("shrug", &shrug_txt, &shrug),
-                                types::InlineQueryResult::new_article("GNU/Linux", &gnu_txt, &gnu)];
+                match res_pastes {
+                    Ok(str_pastes) => {
+                        let mut pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
+                        pastes.sort_by_key(|p| p.uses);
+                        let mut results = Vec::new();
 
-                let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, results).cache_time(0));
+                        let mut sh = Md5::new();
+                        for paste in pastes {
+                            let content = InputMessageContent::new_text(&paste.text);
+                            sh.input_str(&paste.text);
+
+                            let hash = sh.result_str();
+                            let res = InlineQueryResult::new_article(&hash, &paste.text, &content);
+
+                            results.push(res);
+                            sh.reset();
+                        }
+                        let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
+                    }
+
+                    Err(e) => {
+                        // Oh shit waddup
+                    }
+                }
             }
         }
     }
