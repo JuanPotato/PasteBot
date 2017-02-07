@@ -61,8 +61,8 @@ fn main() {
         conn.execute("
             CREATE TABLE users (
                 id              INTEGER PRIMARY KEY,
-                pastes          STRING DEFAULT '[]',
-                state           INTEGER NOT NULL DEFAULT 0
+                state           INTEGER NOT NULL DEFAULT 0,
+                amount          INTEGER NOT NULL DEFAULT 0
             )", &[]).unwrap();
         // States
         // 0 Nothing going on
@@ -94,22 +94,16 @@ fn main() {
                                 let _ = bot.send_message(&args::SendMessage::new(about)
                                     .chat_id(message.chat.id).parse_mode("HTML"));
                             }
-                            "/listpastes" => {
-                                let res_pastes: Result<String, _> = conn.query_row(
-                                    "SELECT pastes FROM users WHERE id=?1",
-                                    &[&from.id],
-                                    |row| {
-                                        row.get(0)
-                                    }
-                                );
+                            "/listpastes" => { // Will change to an inline /managepastes later, this is for debugging right now
+                                let res_pastes: Result<String, _> = conn.query_row(&format!(
+                                    "SELECT Group_Concat(text) FROM pastes{}", from.id),
+                                    &[], |row| row.get(0));
 
                                 match res_pastes {
                                     Ok(str_pastes) => {
-                                        let pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
-
-                                    let _ = bot.send_message(&args::SendMessage
-                                        ::new(&serde_json::to_string(&pastes).unwrap())
-                                        .chat_id(message.chat.id));
+                                        let _ = bot.send_message(&args::SendMessage
+                                            ::new(&str_pastes)
+                                            .chat_id(message.chat.id));
                                     }
 
                                     Err(e) => {
@@ -118,6 +112,24 @@ fn main() {
                                 }
                             }
                             "/newpaste" => {
+                                let amount: Result<i64, _> = conn.query_row(
+                                    "SELECT amount FROM users WHERE id=?1",
+                                    &[&from.id], |row| row.get(0));
+
+                                match amount {
+                                    Ok(num) => {
+                                        if num == 0 {
+                                            conn.execute(&format!("
+                                                CREATE TABLE pastes{} (
+                                                    hash            STRING NOT NULL PRIMARY KEY,
+                                                    text            STRING NOT NULL,
+                                                    uses            INTEGER NOT NULL DEFAULT 0
+                                                )", from.id), &[]).unwrap();
+                                        }
+                                    },
+                                    Err(e) => {},
+                                }
+
                                 conn.execute("
                                     UPDATE users
                                     SET state = 1
@@ -131,10 +143,7 @@ fn main() {
                             _ => {
                                 let cur_state: Result<i64, _> = conn.query_row(
                                     "SELECT state FROM users WHERE id=?1",
-                                    &[&from.id], |row| {
-                                        row.get(0)
-                                    }
-                                );
+                                    &[&from.id], |row| row.get(0));
 
                                 match cur_state {
                                     Ok(num) => {
@@ -146,33 +155,17 @@ fn main() {
                                                     WHERE id=?1",
                                                     &[&from.id]).unwrap();
 
-                                                let res_pastes: Result<String, _> = conn.query_row(
-                                                    "SELECT pastes FROM users WHERE id=?1",
-                                                    &[&from.id],
-                                                    |row| {
-                                                        row.get(0)
-                                                    }
-                                                );
+                                                let mut sh = Md5::new();
+                                                sh.input_str(&message_text);
 
-                                                match res_pastes {
-                                                    Ok(str_pastes) => {
-                                                        let mut pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
-                                                        pastes.push(Paste { text: message_text.to_string(), uses: 0 });
-                                                        conn.execute("
-                                                            UPDATE users
-                                                            SET pastes = ?2
-                                                            WHERE id=?1",
-                                                            &[&from.id, &serde_json::to_string(&pastes).unwrap()]).unwrap();
+                                                conn.execute(&format!("
+                                                    INSERT OR IGNORE INTO pastes{} (hash, text)
+                                                    VALUES (?1, ?2)", from.id),
+                                                    &[&sh.result_str(), &message_text]).unwrap();
 
-                                                        let _ = bot.send_message(&args::SendMessage
-                                                            ::new("Added.")
-                                                            .chat_id(message.chat.id));
-                                                    }
-
-                                                    Err(e) => {
-                                                        // Oh shit waddup
-                                                    }
-                                                }
+                                                let _ = bot.send_message(&args::SendMessage
+                                                    ::new("Added.")
+                                                    .chat_id(message.chat.id));
                                             },
 
                                             _ => { }
@@ -190,38 +183,50 @@ fn main() {
             }
 
             if let Some(inline_query) = update.inline_query {
-                let res_pastes: Result<String, _> = conn.query_row(
-                    "SELECT pastes FROM users WHERE id=?1",
-                    &[&inline_query.from.id], |row| row.get(0));
-
-                match res_pastes {
-                    Ok(str_pastes) => {
-                        let mut pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
-                        pastes.sort_by_key(|p| p.uses);
-                        let mut results = Vec::new();
-
-                        let mut sh = Md5::new();
-                        for paste in pastes {
-                            let content = InputMessageContent::new_text(&paste.text);
-                            sh.input_str(&paste.text);
-
-                            let hash = sh.result_str();
-                            let res = InlineQueryResult::new_article(&hash, &paste.text, &content);
-
-                            results.push(res);
-                            sh.reset();
-                        }
-                        let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
-                    }
-
-                    Err(e) => {
-                        // Oh shit waddup
-                    }
-                }
+                handle_inline(&bot, &inline_query, &conn);
             }
         }
     }
     update_args.limit = Some(0);
     update_args.timeout = Some(0);
     let _ = bot.get_updates(&update_args);
+}
+
+fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connection) {
+    let mut stmt = try!(conn.prepare("SELECT hash, text FROM pastes{} ORDER BY uses DESC"));
+    let rows = try!(stmt.query_map_named(&[(":id", &"one")], |row| row.get(0)));
+
+    let mut names = Vec::new();
+    for name_result in rows {
+        names.push(try!(name_result));
+    }
+
+    let res_pastes: Result<String, _> = conn.query_row(
+        "SELECT pastes FROM users WHERE id=?1",
+        &[&inline_query.from.id], |row| row.get(0));
+
+    match res_pastes {
+        Ok(str_pastes) => {
+            let mut pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
+            pastes.sort_by_key(|p| p.uses);
+            let mut results = Vec::new();
+
+            let mut sh = Md5::new();
+            for i in 0..pastes.len() {
+                let content = InputMessageContent::new_text(&pastes[i].text);
+                sh.input_str(pastes[i].text.as_str());
+
+                let hash = sh.result_str();
+                let res = InlineQueryResult::new_article(hash.as_str(), &pastes[i].text, &content);
+
+                results.push(res);
+                sh.reset();
+            }
+            let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
+        }
+
+        Err(e) => {
+            // Oh shit waddup
+        }
+    }
 }
