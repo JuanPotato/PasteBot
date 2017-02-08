@@ -32,18 +32,6 @@ fn main() {
     let bot = Arc::new(BotApi::new_debug(token));
 
     let me_irl = bot.get_me().expect("Could not establish a connection :\\");
-    let about = "Hey, I'm Paste Bot!\n\n\
-
-                I'm an inline bot that to make it easier for you to shitpost by \
-                letting you add custom endings to your message. Or if you want \
-                to send a copypasta but hate searching it up eerytime, I can do \
-                that too. Each paste is configurable. Your pastes are sorted inline \
-                by how often you use them (although this is also configurable).\n\n\
-
-                Use /newpaste to get started.\n\n\
-
-                Made by @JuanPotato, \
-                <a href=\"https://github.com/JuanPotato/PasteBot\">Source</a>";
 
     let db_path = Path::new("./database.db");
     let exists = db_path.exists();
@@ -55,8 +43,8 @@ fn main() {
             CREATE TABLE users (
                 id              INTEGER PRIMARY KEY,
                 state           INTEGER NOT NULL DEFAULT 0,
-                amount          INTEGER NOT NULL DEFAULT 0
-                new             BOOLEAN DEFAULT FALSE
+                amount          INTEGER NOT NULL DEFAULT 0,
+                new             BOOLEAN NOT NULL DEFAULT 1
             )", &[]).unwrap();
         // States
         // 0 Nothing going on
@@ -73,6 +61,8 @@ fn main() {
 
             if let Some(message) = update.message {
                 if let Some(from) = message.from { // This is getting nasty
+                    conn.execute("INSERT OR IGNORE INTO users (id) VALUES (?1)",
+                                 &[&from.id]).unwrap();
 
                     let message_text = message.text.unwrap_or(String::new());
                     let mut split_text = message_text.split_whitespace();
@@ -80,57 +70,13 @@ fn main() {
                     if let Some(cmd) = split_text.next() {
                         match cmd {
                             "/start" | "/help" => {
-                                conn.execute("
-                                    INSERT OR IGNORE INTO users (id)
-                                    VALUES (?1)",
-                                    &[&from.id]).unwrap();
-
-                                let _ = bot.send_message(&args::SendMessage::new(about)
-                                    .chat_id(message.chat.id).parse_mode("HTML"));
+                                welcome_message(&bot, message.chat.id)
                             }
                             "/listpastes" => { // Will change to an inline /managepastes later, this is for debugging right now
-                                let res_pastes: Result<String, _> = conn.query_row(&format!(
-                                    "SELECT Group_Concat(text) FROM pastes{}", from.id),
-                                    &[], |row| row.get(0));
-
-                                match res_pastes {
-                                    Ok(str_pastes) => {
-                                        let _ = bot.send_message(&args::SendMessage
-                                            ::new(&str_pastes)
-                                            .chat_id(message.chat.id));
-                                    }
-
-                                    Err(e) => println!("{:?}", e)
-                                }
+                                handle_list_pastes(&bot, &from, &message.chat, &conn);
                             }
                             "/newpaste" => {
-                                let amount: Result<bool, _> = conn.query_row(
-                                    "SELECT new FROM users WHERE id=?1",
-                                    &[&from.id], |row| row.get(0));
-
-                                match amount {
-                                    Ok(num) => {
-                                        if num {
-                                            conn.execute(&format!("
-                                                CREATE TABLE pastes{} (
-                                                    hash            STRING NOT NULL PRIMARY KEY,
-                                                    text            STRING NOT NULL,
-                                                    uses            INTEGER NOT NULL DEFAULT 0
-                                                )", from.id), &[]).unwrap();
-                                        }
-                                    },
-                                    Err(e) => println!("{:?}", e)
-                                }
-
-                                conn.execute("
-                                    UPDATE users
-                                    SET state = 1
-                                    WHERE id=?1",
-                                    &[&from.id]).unwrap();
-
-                                let _ = bot.send_message(&args::SendMessage
-                                    ::new("Ok, send me the text you want that paste to be.")
-                                    .chat_id(message.chat.id));
+                                handle_new_paste(&bot, &from, &message.chat, &conn);
                             }
                             _ => {
                                 let cur_state: Result<i64, _> = conn.query_row(
@@ -140,25 +86,7 @@ fn main() {
                                 match cur_state {
                                     Ok(num) => {
                                         match num {
-                                            1 => {
-                                                conn.execute("
-                                                    UPDATE users
-                                                    SET state = 0
-                                                    WHERE id=?1",
-                                                    &[&from.id]).unwrap();
-
-                                                let mut sh = Md5::new();
-                                                sh.input_str(&message_text);
-
-                                                conn.execute(&format!("
-                                                    INSERT OR IGNORE INTO pastes{} (hash, text)
-                                                    VALUES (?1, ?2)", from.id),
-                                                    &[&sh.result_str(), &message_text]).unwrap();
-
-                                                let _ = bot.send_message(&args::SendMessage
-                                                    ::new("Added.")
-                                                    .chat_id(message.chat.id));
-                                            },
+                                            1 => add_new_paste(&bot, &from, &message.chat, &message_text, &conn),
 
                                             _ => {}
                                         }
@@ -173,6 +101,8 @@ fn main() {
             }
 
             if let Some(inline_query) = update.inline_query {
+                conn.execute("INSERT OR IGNORE INTO users (id) VALUES (?1)",
+                             &[&inline_query.from.id]).unwrap();
                 handle_inline(&bot, &inline_query, &conn);
             }
         }
@@ -182,37 +112,161 @@ fn main() {
     let _ = bot.get_updates(&update_args);
 }
 
-fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connection) {
-    let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC", inline_query.from.id);
-    let mut stmt = conn.prepare(&query).unwrap();
-    let mut res_pastes = stmt.query_map_named(&[], |row| {
-        Paste {
-            text: row.get(0),
-            hash: row.get(1),
-        }
-    }).unwrap();
+fn welcome_message(bot: &BotApi, chat_id: i64) {
+    let about = "Hey, I'm Paste Bot!\n\n\
 
-    let mut pastes: Vec<Paste> = Vec::new();
-    let mut contents: Vec<InputMessageContent> = Vec::new();
-    let mut results = Vec::new();
+                I'm an inline bot that to make it easier for you to shitpost by \
+                letting you add custom endings to your message. Or if you want \
+                to send a copypasta but hate searching it up eerytime, I can do \
+                that too. Each paste is configurable. Your pastes are sorted inline \
+                by how often you use them (although this is also configurable).\n\n\
 
-    for res_paste in res_pastes {
-        match res_paste {
-            Ok(paste) => {
-                pastes.push(paste)
+                Use /newpaste to get started.\n\n\
+
+                Made by @JuanPotato, \
+                <a href=\"https://github.com/JuanPotato/PasteBot\">Source</a>";
+    // Is it bad practise to have a huge string inside a function?
+
+    let _ = bot.send_message(&args::SendMessage
+                             ::new(about)
+                             .chat_id(chat_id)
+                             .parse_mode("HTML"));
+}
+
+fn needs_pastes(conn: &Connection, id: i64) -> bool {
+    // conn.query_row(
+    //     "SELECT new,amount FROM users WHERE id=?1",
+    //     &[&id], |row| {
+    //         let new: bool = row.get(0);
+    //         let amount: i64 = row.get(1);
+    //         new && amount > 0
+    //     }).unwrap()
+    conn.query_row(  // Which one is faster though :\
+        "SELECT CASE WHEN amount > 0 AND new != 1 
+            THEN 0
+            ELSE 1
+        END AS thing
+        FROM users WHERE id=?1",
+        &[&id], |row| row.get(0)).unwrap()
+}
+
+fn handle_list_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, conn: &Connection) {
+    if needs_pastes(conn, from.id) {
+        let _ = bot.send_message(&args::SendMessage
+            ::new("It doesn't seem like you have any pastes. :(\n\
+                   Use /newpaste to make one.")
+            .chat_id(chat.id));
+    } else {
+        let res_pastes: Result<String, _> = conn.query_row(&format!(
+            "SELECT Group_Concat(text) FROM pastes{}", from.id),
+            &[], |row| row.get(0));
+
+        match res_pastes {
+            Ok(str_pastes) => {
+                let _ = bot.send_message(&args::SendMessage
+                    ::new(&str_pastes)
+                    .chat_id(chat.id));
             }
+
             Err(e) => println!("{:?}", e)
         }
     }
+}
 
-    for paste in &pastes {
-        contents.push(InputMessageContent::new_text(&paste.text));
+fn add_new_paste(bot: &BotApi, from: &types::User, chat: &types::Chat, message_text: &str, conn: &Connection) {
+    conn.execute("UPDATE users
+                  SET state=0
+                  WHERE id=?1",
+                 &[&from.id]).unwrap();
+
+    let mut sh = Md5::new();
+    sh.input_str(message_text);
+
+    conn.execute(&format!("
+        INSERT OR IGNORE INTO pastes{} (hash, text)
+        VALUES (?1, ?2)", from.id),
+        &[&sh.result_str(), &message_text]).unwrap();
+
+    conn.execute("UPDATE users
+                  SET amount=amount+1
+                  WHERE id=?1",
+                 &[&from.id]).unwrap();
+
+    let _ = bot.send_message(&args::SendMessage
+        ::new("Added.")
+        .chat_id(chat.id));
+}
+
+fn handle_new_paste(bot: &BotApi, from: &types::User, chat: &types::Chat, conn: &Connection) {
+    let is_new = conn.query_row(
+        "SELECT new FROM users WHERE id=?1",
+        &[&from.id], |row| row.get(0)).unwrap();
+
+    if is_new {
+        conn.execute(&format!("
+            CREATE TABLE pastes{} (
+                hash            STRING NOT NULL PRIMARY KEY,
+                text            STRING NOT NULL,
+                uses            INTEGER NOT NULL DEFAULT 0
+            )", from.id), &[]).unwrap();
+
+        conn.execute("
+            UPDATE users
+            SET new=0
+            WHERE id=?1",
+            &[&from.id]).unwrap();
     }
 
-    for (i, paste) in pastes.iter().enumerate() {
-        results.push(InlineQueryResult::new_article(&paste.hash, &paste.text, &contents[i]));
+    conn.execute("
+        UPDATE users
+        SET state=1
+        WHERE id=?1",
+        &[&from.id]).unwrap();
+
+    let _ = bot.send_message(&args::SendMessage
+        ::new("Ok, send me the text you want that paste to be.")
+        .chat_id(chat.id));
+}
+
+fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connection) {
+    if needs_pastes(conn, inline_query.from.id) {
+        let _ = bot.answer_inline_query(
+            &args::AnswerInlineQuery::new(
+                &inline_query.id, &[]
+            ).switch_pm_text("You don't have any pastes, tap me to start.")
+             .is_personal(true).cache_time(0));
+    } else {
+        let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC",
+                            inline_query.from.id);
+        let mut stmt = conn.prepare(&query).unwrap();
+        let res_pastes = stmt.query_map_named(&[], |row| {
+            Paste {
+                text: row.get(0),
+                hash: row.get(1),
+            }
+        }).unwrap();
+
+        let mut pastes: Vec<Paste> = Vec::new();
+        let mut contents: Vec<InputMessageContent> = Vec::new();
+        let mut results = Vec::new();
+
+        for res_paste in res_pastes {
+            match res_paste {
+                Ok(paste) => {
+                    pastes.push(paste)
+                }
+                Err(e) => println!("{:?}", e)
+            }
+        }
+
+        for paste in &pastes {
+            contents.push(InputMessageContent::new_text(&paste.text));
+        }
+
+        for (paste, content) in pastes.iter().zip(contents.iter()) {
+            results.push(InlineQueryResult::new_article(&paste.hash, &paste.text, &content));
+        }
+
+        let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
     }
-
-
-    let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
 }
