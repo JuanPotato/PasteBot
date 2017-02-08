@@ -1,7 +1,4 @@
 #[macro_use]
-extern crate serde_derive;
-
-extern crate serde_json;
 extern crate tg_botapi;
 extern crate rusqlite;
 extern crate crypto;
@@ -20,18 +17,14 @@ use tg_botapi::types::InlineQueryResult;
 
 use tg_botapi::BotApi;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 // use std::thread;
 // use std::env;
 
-use serde_json::Value;
-use serde_json::Number;
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 struct Paste {
     text: String,
-    uses: i64,
+    hash: String,
 }
 
 fn main() {
@@ -63,6 +56,7 @@ fn main() {
                 id              INTEGER PRIMARY KEY,
                 state           INTEGER NOT NULL DEFAULT 0,
                 amount          INTEGER NOT NULL DEFAULT 0
+                new             BOOLEAN DEFAULT FALSE
             )", &[]).unwrap();
         // States
         // 0 Nothing going on
@@ -106,19 +100,17 @@ fn main() {
                                             .chat_id(message.chat.id));
                                     }
 
-                                    Err(e) => {
-                                        // Oh shit waddup
-                                    }
+                                    Err(e) => println!("{:?}", e)
                                 }
                             }
                             "/newpaste" => {
-                                let amount: Result<i64, _> = conn.query_row(
-                                    "SELECT amount FROM users WHERE id=?1",
+                                let amount: Result<bool, _> = conn.query_row(
+                                    "SELECT new FROM users WHERE id=?1",
                                     &[&from.id], |row| row.get(0));
 
                                 match amount {
                                     Ok(num) => {
-                                        if num == 0 {
+                                        if num {
                                             conn.execute(&format!("
                                                 CREATE TABLE pastes{} (
                                                     hash            STRING NOT NULL PRIMARY KEY,
@@ -127,7 +119,7 @@ fn main() {
                                                 )", from.id), &[]).unwrap();
                                         }
                                     },
-                                    Err(e) => {},
+                                    Err(e) => println!("{:?}", e)
                                 }
 
                                 conn.execute("
@@ -168,13 +160,11 @@ fn main() {
                                                     .chat_id(message.chat.id));
                                             },
 
-                                            _ => { }
+                                            _ => {}
                                         }
                                     }
 
-                                    Err(e) => {
-                                        // Oh shit waddup
-                                    }
+                                    Err(e) => println!("{:?}", e)
                                 }
                             }
                         }
@@ -193,40 +183,36 @@ fn main() {
 }
 
 fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connection) {
-    let mut stmt = try!(conn.prepare("SELECT hash, text FROM pastes{} ORDER BY uses DESC"));
-    let rows = try!(stmt.query_map_named(&[(":id", &"one")], |row| row.get(0)));
+    let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC", inline_query.from.id);
+    let mut stmt = conn.prepare(&query).unwrap();
+    let mut res_pastes = stmt.query_map_named(&[], |row| {
+        Paste {
+            text: row.get(0),
+            hash: row.get(1),
+        }
+    }).unwrap();
 
-    let mut names = Vec::new();
-    for name_result in rows {
-        names.push(try!(name_result));
-    }
+    let mut pastes: Vec<Paste> = Vec::new();
+    let mut contents: Vec<InputMessageContent> = Vec::new();
+    let mut results = Vec::new();
 
-    let res_pastes: Result<String, _> = conn.query_row(
-        "SELECT pastes FROM users WHERE id=?1",
-        &[&inline_query.from.id], |row| row.get(0));
-
-    match res_pastes {
-        Ok(str_pastes) => {
-            let mut pastes: Vec<Paste> = serde_json::from_str(&str_pastes).unwrap();
-            pastes.sort_by_key(|p| p.uses);
-            let mut results = Vec::new();
-
-            let mut sh = Md5::new();
-            for i in 0..pastes.len() {
-                let content = InputMessageContent::new_text(&pastes[i].text);
-                sh.input_str(pastes[i].text.as_str());
-
-                let hash = sh.result_str();
-                let res = InlineQueryResult::new_article(hash.as_str(), &pastes[i].text, &content);
-
-                results.push(res);
-                sh.reset();
+    for res_paste in res_pastes {
+        match res_paste {
+            Ok(paste) => {
+                pastes.push(paste)
             }
-            let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
-        }
-
-        Err(e) => {
-            // Oh shit waddup
+            Err(e) => println!("{:?}", e)
         }
     }
+
+    for paste in &pastes {
+        contents.push(InputMessageContent::new_text(&paste.text));
+    }
+
+    for (i, paste) in pastes.iter().enumerate() {
+        results.push(InlineQueryResult::new_article(&paste.hash, &paste.text, &contents[i]));
+    }
+
+
+    let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
 }
