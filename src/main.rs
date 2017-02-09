@@ -14,6 +14,8 @@ use tg_botapi::args;
 use tg_botapi::types;
 use tg_botapi::types::InputMessageContent;
 use tg_botapi::types::InlineQueryResult;
+use tg_botapi::types::InlineKeyboardButton;
+use tg_botapi::types::ReplyMarkup;
 
 use tg_botapi::BotApi;
 
@@ -31,7 +33,7 @@ fn main() {
     let token = ""; // I'm lazy go away
     let bot = Arc::new(BotApi::new_debug(token));
 
-    let me_irl = bot.get_me().expect("Could not establish a connection :\\");
+    // let me_irl = bot.get_me().expect("Could not establish a connection :\\");
 
     let db_path = Path::new("./database.db");
     let exists = db_path.exists();
@@ -74,6 +76,9 @@ fn main() {
                             }
                             "/listpastes" => { // Will change to an inline /managepastes later, this is for debugging right now
                                 handle_list_pastes(&bot, &from, &message.chat, &conn);
+                            }
+                            "/managepastes" => { // Will change to an inline /managepastes later, this is for debugging right now
+                                handle_manage_pastes(&bot, &from, &message.chat, &conn);
                             }
                             "/newpaste" => {
                                 handle_new_paste(&bot, &from, &message.chat, &conn);
@@ -148,6 +153,65 @@ fn needs_pastes(conn: &Connection, id: i64) -> bool {
         END AS thing
         FROM users WHERE id=?1",
         &[&id], |row| row.get(0)).unwrap()
+}
+
+fn handle_manage_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, conn: &Connection) {
+    if needs_pastes(conn, from.id) {
+        let _ = bot.send_message(&args::SendMessage
+            ::new("It doesn't seem like you have any pastes. :(\n\
+                   Use /newpaste to make one.")
+            .chat_id(chat.id));
+    } else {
+        let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC LIMIT 6",
+                            from.id);
+        let mut stmt = conn.prepare(&query).unwrap();
+        let res_pastes = stmt.query_map_named(&[], |row| {
+            let mut text: String = row.get(0);
+            Paste {
+                text: if text.len() < 10 {
+                    text
+                } else {
+                    text.truncate(7);
+                    format!("{}...", text)
+                },
+                hash: row.get(1),
+            }
+        }).unwrap();
+
+        let mut pastes: Vec<Paste> = Vec::new();
+        let mut buttons: Vec<InlineKeyboardButton> = Vec::new();
+        let mut keyboard = Vec::new();
+
+        for res_paste in res_pastes {
+            match res_paste {
+                Ok(paste) => {
+                    pastes.push(paste)
+                }
+                Err(e) => println!("{:?}", e)
+            }
+        }
+
+        for paste in &pastes {
+            buttons.push(InlineKeyboardButton
+                ::new(&paste.text)
+                .callback_data(&paste.hash)
+            );
+        }
+
+        for row in buttons.chunks(2) { // row your boat
+            keyboard.push(row);
+        }
+
+        let _ = bot.send_message(
+            &args::SendMessage
+                ::new("Select a paste")
+                .chat_id(chat.id)
+                .reply_markup(
+                    &ReplyMarkup::new_inline_keyboard(
+                        &keyboard[..]
+                    )
+                ));
+    }
 }
 
 fn handle_list_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, conn: &Connection) {
