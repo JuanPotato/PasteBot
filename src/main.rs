@@ -27,6 +27,7 @@ use std::sync::Arc;
 struct Paste {
     text: String,
     hash: String,
+    uses: i64,
 }
 
 fn main() {
@@ -110,6 +111,10 @@ fn main() {
                              &[&inline_query.from.id]).unwrap();
                 handle_inline(&bot, &inline_query, &conn);
             }
+
+            if let Some(callback_query) = update.callback_query {
+                handle_button(&bot, &callback_query, &conn);
+            }
         }
     }
     update_args.limit = Some(0);
@@ -155,6 +160,31 @@ fn needs_pastes(conn: &Connection, id: i64) -> bool {
         &[&id], |row| row.get(0)).unwrap()
 }
 
+fn paste_count(conn: &Connection, id: i64) -> i64 {
+    conn.query_row(
+        "SELECT amount FROM users WHERE id=?1",
+        &[&id], |row| row.get(0)).unwrap()
+}
+
+fn handle_button(bot: &BotApi, callback_query: &types::CallbackQuery, conn: &Connection) {
+    conn.query_row(
+        format!("SELECT text,hash,uses FROM pastes{} ORDER BY uses WHERE hash=?1",
+                            from.id);
+        &[&callback_query.data], |row| {
+            Paste {
+                text: row.get(0),
+                hash: row.get(1),
+                uses: row.get(2)
+            }
+        }).unwrap()
+
+    let mut edit_args = args::EditMessageText::new(Paste.text)
+        .chat_id(message.chat.id)
+        .message_id(sent_message.message_id)
+        .parse_mode("Markdown");
+        let _ = bot.edit_message_text(&edit_args);
+}
+
 fn handle_manage_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, conn: &Connection) {
     if needs_pastes(conn, from.id) {
         let _ = bot.send_message(&args::SendMessage
@@ -175,6 +205,7 @@ fn handle_manage_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, co
                     format!("{}...", text)
                 },
                 hash: row.get(1),
+                uses: 0
             }
         }).unwrap();
 
@@ -307,6 +338,7 @@ fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connect
             Paste {
                 text: row.get(0),
                 hash: row.get(1),
+                uses: 0
             }
         }).unwrap();
 
