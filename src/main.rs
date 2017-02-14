@@ -115,11 +115,12 @@ fn main() {
             if let Some(callback_query) = update.callback_query {
                 handle_button(&bot, &callback_query, &conn);
             }
+
+            if let Some(chosen_inline_result) = update.chosen_inline_result {
+                handle_chosen_paste(&chosen_inline_result, &conn);
+            }
         }
     }
-    update_args.limit = Some(0);
-    update_args.timeout = Some(0);
-    let _ = bot.get_updates(&update_args);
 }
 
 fn welcome_message(bot: &BotApi, chat_id: i64) {
@@ -167,22 +168,25 @@ fn paste_count(conn: &Connection, id: i64) -> i64 {
 }
 
 fn handle_button(bot: &BotApi, callback_query: &types::CallbackQuery, conn: &Connection) {
-    conn.query_row(
-        format!("SELECT text,hash,uses FROM pastes{} ORDER BY uses WHERE hash=?1",
-                            from.id);
+    let paste = conn.query_row(
+        &format!("SELECT text,hash,uses FROM pastes{} WHERE hash=?1 ORDER BY uses",
+                    callback_query.from.id),
         &[&callback_query.data], |row| {
             Paste {
                 text: row.get(0),
                 hash: row.get(1),
                 uses: row.get(2)
             }
-        }).unwrap()
+        }).unwrap();
 
-    let mut edit_args = args::EditMessageText::new(Paste.text)
-        .chat_id(message.chat.id)
-        .message_id(sent_message.message_id)
-        .parse_mode("Markdown");
-        let _ = bot.edit_message_text(&edit_args);
+    if let Some(ref msg) = callback_query.message {
+        let text = format!("Text: {}\n\nUses: {}", paste.text, paste.uses);
+        let edit_args = args::EditMessageText::new(&text)
+            .chat_id(msg.chat.id)
+            .message_id(msg.message_id)
+            .parse_mode("Markdown");
+            let _ = bot.edit_message_text(&edit_args);
+    }
 }
 
 fn handle_manage_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, conn: &Connection) {
@@ -365,4 +369,11 @@ fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connect
 
         let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
     }
+}
+
+fn handle_chosen_paste(chosen_inline_result: &types::ChosenInlineResult, conn: &Connection) {
+    conn.execute(&format!(
+        "UPDATE pastes{} SET uses = uses+1 WHERE hash=?1",
+        chosen_inline_result.from.id),
+    &[&chosen_inline_result.result_id]).unwrap();
 }
