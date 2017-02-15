@@ -112,8 +112,8 @@ fn main() {
                 handle_inline(&bot, &inline_query, &conn);
             }
 
-            if let Some(callback_query) = update.callback_query {
-                handle_button(&bot, &callback_query, &conn);
+            if let Some(ref callback_query) = update.callback_query {
+                handle_button(&bot, callback_query, &conn);
             }
 
             if let Some(chosen_inline_result) = update.chosen_inline_result {
@@ -168,25 +168,93 @@ fn paste_count(conn: &Connection, id: i64) -> i64 {
 }
 
 fn handle_button(bot: &BotApi, callback_query: &types::CallbackQuery, conn: &Connection) {
-    let paste = conn.query_row(
-        &format!("SELECT text,hash,uses FROM pastes{} WHERE hash=?1 ORDER BY uses",
-                    callback_query.from.id),
-        &[&callback_query.data], |row| {
-            Paste {
-                text: row.get(0),
-                hash: row.get(1),
-                uses: row.get(2)
-            }
-        }).unwrap();
+    match callback_query.data.as_str() {
+        "delete" => {
+            // Development is put on hold until I release a new version of 
+        },
+        "back" => {
+            // let edit_args = args::EditMessageText::new(&text)
+            //     .chat_id(msg.chat.id)
+            //     .message_id(msg.message_id)
+            //     .parse_mode("Markdown")
+            //     .reply_markup(&reply_markup);
+            //     let _ = bot.edit_message_text(&edit_args);
 
-    if let Some(ref msg) = callback_query.message {
-        let text = format!("Text: {}\n\nUses: {}", paste.text, paste.uses);
-        let edit_args = args::EditMessageText::new(&text)
-            .chat_id(msg.chat.id)
-            .message_id(msg.message_id)
-            .parse_mode("Markdown");
-            let _ = bot.edit_message_text(&edit_args);
+        },
+        _ => {
+            let paste = conn.query_row(
+                &format!("SELECT text,hash,uses FROM pastes{} WHERE hash=?1 ORDER BY uses",
+                            callback_query.from.id),
+                &[&callback_query.data], |row| {
+                    Paste {
+                        text: row.get(0),
+                        hash: row.get(1),
+                        uses: row.get(2)
+                    }
+                }).unwrap();
+
+            if let Some(ref msg) = callback_query.message {
+                let text = format!("Text: {}\n\nUses: {}", paste.text, paste.uses);
+                let k = vec![
+                    InlineKeyboardButton::new("Delete").callback_data("delete"),
+                    InlineKeyboardButton::new("Back").callback_data("back"),
+                ];
+
+                let keyboard = [&k[..]];
+                
+                let reply_markup = ReplyMarkup::new_inline_keyboard(
+                    &keyboard[..]
+                );
+
+                let edit_args = args::EditMessageText::new(&text)
+                    .chat_id(msg.chat.id)
+                    .message_id(msg.message_id)
+                    .parse_mode("Markdown")
+                    .reply_markup(&reply_markup);
+                let _ = bot.edit_message_text(&edit_args);
+            }
+        }
     }
+}
+
+fn get_pastes_as_buttons(user_id: i64, conn: &Connection) -> Vec<InlineKeyboardButton> {
+    let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC LIMIT 6",
+                        user_id);
+    let mut stmt = conn.prepare(&query).unwrap();
+    let res_pastes = stmt.query_map_named(&[], |row| {
+        let mut text: String = row.get(0);
+        Paste {
+            text: if text.len() < 10 {
+                text
+            } else {
+                text.truncate(7);
+                format!("{}...", text)
+            },
+            hash: row.get(1),
+            uses: 0
+        }
+    }).unwrap();
+
+    let mut pastes: Vec<Paste> = Vec::new();
+    let mut buttons: Vec<InlineKeyboardButton> = Vec::new();
+
+    for res_paste in res_pastes {
+        match res_paste {
+            Ok(paste) => {
+                pastes.push(paste)
+            }
+            Err(e) => println!("{:?}", e)
+        }
+    }
+
+    for paste in &pastes {  // Ok, pointers to all this crap sucks. I'm going to change a few things
+        buttons.push(InlineKeyboardButton
+            ::new(&paste.text)
+            .callback_data(&paste.hash)
+        );
+    }
+
+    buttons
 }
 
 fn handle_manage_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, conn: &Connection) {
@@ -196,42 +264,8 @@ fn handle_manage_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, co
                    Use /newpaste to make one.")
             .chat_id(chat.id));
     } else {
-        let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC LIMIT 6",
-                            from.id);
-        let mut stmt = conn.prepare(&query).unwrap();
-        let res_pastes = stmt.query_map_named(&[], |row| {
-            let mut text: String = row.get(0);
-            Paste {
-                text: if text.len() < 10 {
-                    text
-                } else {
-                    text.truncate(7);
-                    format!("{}...", text)
-                },
-                hash: row.get(1),
-                uses: 0
-            }
-        }).unwrap();
-
-        let mut pastes: Vec<Paste> = Vec::new();
-        let mut buttons: Vec<InlineKeyboardButton> = Vec::new();
+        let buttons = get_pastes_as_buttons(from.id, conn);
         let mut keyboard = Vec::new();
-
-        for res_paste in res_pastes {
-            match res_paste {
-                Ok(paste) => {
-                    pastes.push(paste)
-                }
-                Err(e) => println!("{:?}", e)
-            }
-        }
-
-        for paste in &pastes {
-            buttons.push(InlineKeyboardButton
-                ::new(&paste.text)
-                .callback_data(&paste.hash)
-            );
-        }
 
         for row in buttons.chunks(2) { // row your boat
             keyboard.push(row);
