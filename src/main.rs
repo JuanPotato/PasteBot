@@ -63,7 +63,7 @@ fn main() {
             update_args.offset = Some(update.update_id + 1);
 
             if let Some(message) = update.message {
-                if let Some(from) = message.from { // This is getting nasty
+                if let Some(ref from) = message.from { // This is getting nasty
                     conn.execute("INSERT OR IGNORE INTO users (id) VALUES (?1)",
                                  &[&from.id]).unwrap();
 
@@ -106,7 +106,7 @@ fn main() {
                 }
             }
 
-            if let Some(inline_query) = update.inline_query {
+            if let Some(ref inline_query) = update.inline_query {
                 conn.execute("INSERT OR IGNORE INTO users (id) VALUES (?1)",
                              &[&inline_query.from.id]).unwrap();
                 handle_inline(&bot, &inline_query, &conn);
@@ -116,7 +116,7 @@ fn main() {
                 handle_button(&bot, callback_query, &conn);
             }
 
-            if let Some(chosen_inline_result) = update.chosen_inline_result {
+            if let Some(ref chosen_inline_result) = update.chosen_inline_result {
                 handle_chosen_paste(&chosen_inline_result, &conn);
             }
         }
@@ -168,20 +168,20 @@ fn paste_count(conn: &Connection, id: i64) -> i64 {
 }
 
 fn handle_button(bot: &BotApi, callback_query: &types::CallbackQuery, conn: &Connection) {
-    match callback_query.data.as_str() {
-        "delete" => {
-            // Development is put on hold until I release a new version of 
-        },
-        "back" => {
-            // let edit_args = args::EditMessageText::new(&text)
-            //     .chat_id(msg.chat.id)
-            //     .message_id(msg.message_id)
-            //     .parse_mode("Markdown")
-            //     .reply_markup(&reply_markup);
-            //     let _ = bot.edit_message_text(&edit_args);
+    // match callback_query.data.unwrap().as_str() {
+        // "delete" => {
+        //     // Development is put on hold until I release a new version of 
+        // },
+        // "back" => {
+        //     // let edit_args = args::EditMessageText::new(&text)
+        //     //     .chat_id(msg.chat.id)
+        //     //     .message_id(msg.message_id)
+        //     //     .parse_mode("Markdown")
+        //     //     .reply_markup(&reply_markup);
+        //     //     let _ = bot.edit_message_text(&edit_args);
 
-        },
-        _ => {
+        // },
+        // _ => {
             let paste = conn.query_row(
                 &format!("SELECT text,hash,uses FROM pastes{} WHERE hash=?1 ORDER BY uses",
                             callback_query.from.id),
@@ -195,34 +195,36 @@ fn handle_button(bot: &BotApi, callback_query: &types::CallbackQuery, conn: &Con
 
             if let Some(ref msg) = callback_query.message {
                 let text = format!("Text: {}\n\nUses: {}", paste.text, paste.uses);
-                let k = vec![
-                    InlineKeyboardButton::new("Delete").callback_data("delete"),
-                    InlineKeyboardButton::new("Back").callback_data("back"),
-                ];
-
-                let keyboard = [&k[..]];
                 
                 let reply_markup = ReplyMarkup::new_inline_keyboard(
-                    &keyboard[..]
+                    vec![
+                        vec![
+                            InlineKeyboardButton::new("Delete".into())
+                                .callback_data("delete".into()),
+                            InlineKeyboardButton::new("Back".into())
+                                .callback_data("back".into()),
+                        ]
+                    ]
                 );
 
                 let edit_args = args::EditMessageText::new(&text)
                     .chat_id(msg.chat.id)
                     .message_id(msg.message_id)
                     .parse_mode("Markdown")
-                    .reply_markup(&reply_markup);
+                    .reply_markup(reply_markup.into());
                 let _ = bot.edit_message_text(&edit_args);
             }
-        }
-    }
+    //     }
+    // }
 }
 
-fn get_pastes_as_buttons(user_id: i64, conn: &Connection) -> Vec<InlineKeyboardButton> {
+fn get_pastes_as_buttons(user_id: i64, conn: &Connection) -> Vec<Vec<InlineKeyboardButton>> {
     let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC LIMIT 6",
                         user_id);
     let mut stmt = conn.prepare(&query).unwrap();
-    let res_pastes = stmt.query_map_named(&[], |row| {
+    let mut res_pastes = stmt.query_map_named(&[], |row| {
         let mut text: String = row.get(0);
+
         Paste {
             text: if text.len() < 10 {
                 text
@@ -233,25 +235,40 @@ fn get_pastes_as_buttons(user_id: i64, conn: &Connection) -> Vec<InlineKeyboardB
             hash: row.get(1),
             uses: 0
         }
+
     }).unwrap();
 
     let mut pastes: Vec<Paste> = Vec::new();
-    let mut buttons: Vec<InlineKeyboardButton> = Vec::new();
 
     for res_paste in res_pastes {
         match res_paste {
             Ok(paste) => {
-                pastes.push(paste)
+                pastes.push(paste);
             }
-            Err(e) => println!("{:?}", e)
+            Err(e) => println!("{:?}", e) // Why would this happen
         }
     }
 
-    for paste in &pastes {  // Ok, pointers to all this crap sucks. I'm going to change a few things
-        buttons.push(InlineKeyboardButton
-            ::new(&paste.text)
-            .callback_data(&paste.hash)
-        );
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    let mut i = 0;
+    let len = pastes.len();
+    while i < len {
+        let p1 = pastes.get(i).unwrap();
+        if i + 1 < len {
+            let p2 = pastes.get(i+1).unwrap();
+            buttons.push(vec![
+                InlineKeyboardButton::new(p1.text.clone())
+                    .callback_data(p1.hash.clone()),
+                InlineKeyboardButton::new(p2.text.clone())
+                    .callback_data(p2.hash.clone())
+                ]);
+        } else {
+            buttons.push(vec![
+                InlineKeyboardButton::new(p1.text.clone())
+                    .callback_data(p1.hash.clone())
+            ]);
+        }
     }
 
     buttons
@@ -264,22 +281,14 @@ fn handle_manage_pastes(bot: &BotApi, from: &types::User, chat: &types::Chat, co
                    Use /newpaste to make one.")
             .chat_id(chat.id));
     } else {
-        let buttons = get_pastes_as_buttons(from.id, conn);
-        let mut keyboard = Vec::new();
-
-        for row in buttons.chunks(2) { // row your boat
-            keyboard.push(row);
-        }
+        let keyboard = get_pastes_as_buttons(from.id, conn);
 
         let _ = bot.send_message(
             &args::SendMessage
                 ::new("Select a paste")
                 .chat_id(chat.id)
-                .reply_markup(
-                    &ReplyMarkup::new_inline_keyboard(
-                        &keyboard[..]
-                    )
-                ));
+                .reply_markup(ReplyMarkup::new_inline_keyboard(keyboard).into())
+                );
     }
 }
 
@@ -365,7 +374,7 @@ fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connect
     if needs_pastes(conn, inline_query.from.id) {
         let _ = bot.answer_inline_query(
             &args::AnswerInlineQuery::new(
-                &inline_query.id, &[]
+                &inline_query.id, vec![]
             ).switch_pm_text("You don't have any pastes, tap me to start.")
              .is_personal(true).cache_time(0));
     } else {
@@ -381,7 +390,6 @@ fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connect
         }).unwrap();
 
         let mut pastes: Vec<Paste> = Vec::new();
-        let mut contents: Vec<InputMessageContent> = Vec::new();
         let mut results = Vec::new();
 
         for res_paste in res_pastes {
@@ -393,15 +401,12 @@ fn handle_inline(bot: &BotApi, inline_query: &types::InlineQuery, conn: &Connect
             }
         }
 
-        for paste in &pastes {
-            contents.push(InputMessageContent::new_text(&paste.text));
+
+        for paste in pastes {
+            results.push(InlineQueryResult::new_article(paste.hash.clone(), paste.text.clone(), InputMessageContent::new_text(paste.text.clone())));
         }
 
-        for (paste, content) in pastes.iter().zip(contents.iter()) {
-            results.push(InlineQueryResult::new_article(&paste.hash, &paste.text, &content));
-        }
-
-        let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, &results).cache_time(0));
+        let _ = bot.answer_inline_query(&args::AnswerInlineQuery::new(&inline_query.id, results).cache_time(0));
     }
 }
 

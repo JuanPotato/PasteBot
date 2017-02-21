@@ -4,6 +4,6 @@ version = "0.1.0"
 authors = ["Juan Potato <hasantiny@gmail.com>"]
 
 [dependencies]
-tg_botapi = "0.1.2"
-rusqlite = "0.9.5"
+tg_botapi = "0.2"
+rusqlite = "0.9"
 rust-crypto = "0.2"
