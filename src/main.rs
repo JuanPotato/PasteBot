@@ -1,4 +1,3 @@
-#[macro_use]
 extern crate tg_botapi;
 extern crate rusqlite;
 extern crate crypto;
@@ -56,7 +55,7 @@ fn main() {
 
     let mut update_args = args::GetUpdates::new().timeout(600).offset(0);
 
-    'update_loop: loop {
+    loop {
         let updates = bot.get_updates(&update_args).unwrap();
 
         for update in updates {
@@ -67,7 +66,7 @@ fn main() {
                     conn.execute("INSERT OR IGNORE INTO users (id) VALUES (?1)",
                                  &[&from.id]).unwrap();
 
-                    let message_text = message.text.unwrap_or(String::new());
+                    let message_text = message.text.unwrap_or_default();
                     let mut split_text = message_text.split_whitespace();
 
                     if let Some(cmd) = split_text.next() {
@@ -76,13 +75,13 @@ fn main() {
                                 welcome_message(&bot, message.chat.id)
                             }
                             "/listpastes" => { // Will change to an inline /managepastes later, this is for debugging right now
-                                handle_list_pastes(&bot, &from, &message.chat, &conn);
+                                handle_list_pastes(&bot, from, &message.chat, &conn);
                             }
                             "/managepastes" => { // Will change to an inline /managepastes later, this is for debugging right now
-                                handle_manage_pastes(&bot, &from, &message.chat, &conn);
+                                handle_manage_pastes(&bot, from, &message.chat, &conn);
                             }
                             "/newpaste" => {
-                                handle_new_paste(&bot, &from, &message.chat, &conn);
+                                handle_new_paste(&bot, from, &message.chat, &conn);
                             }
                             _ => {
                                 let cur_state: Result<i64, _> = conn.query_row(
@@ -91,10 +90,8 @@ fn main() {
 
                                 match cur_state {
                                     Ok(num) => {
-                                        match num {
-                                            1 => add_new_paste(&bot, &from, &message.chat, &message_text, &conn),
-
-                                            _ => {}
+                                        if num == 1 {
+                                            add_new_paste(&bot, from, &message.chat, &message_text, &conn);
                                         }
                                     }
 
@@ -109,15 +106,15 @@ fn main() {
             if let Some(ref inline_query) = update.inline_query {
                 conn.execute("INSERT OR IGNORE INTO users (id) VALUES (?1)",
                              &[&inline_query.from.id]).unwrap();
-                handle_inline(&bot, &inline_query, &conn);
+                handle_inline(&bot, inline_query, &conn);
             }
 
-            if let Some(ref callback_query) = update.callback_query {
+            if let Some(callback_query) = update.callback_query {
                 handle_button(&bot, callback_query, &conn);
             }
 
             if let Some(ref chosen_inline_result) = update.chosen_inline_result {
-                handle_chosen_paste(&chosen_inline_result, &conn);
+                handle_chosen_paste(chosen_inline_result, &conn);
             }
         }
     }
@@ -161,31 +158,47 @@ fn needs_pastes(conn: &Connection, id: i64) -> bool {
         &[&id], |row| row.get(0)).unwrap()
 }
 
-fn paste_count(conn: &Connection, id: i64) -> i64 {
-    conn.query_row(
-        "SELECT amount FROM users WHERE id=?1",
-        &[&id], |row| row.get(0)).unwrap()
-}
+fn handle_button(bot: &BotApi, callback_query: types::CallbackQuery, conn: &Connection) {
+    let data = callback_query.data.unwrap();
+    let msg = callback_query.message.unwrap();
+    println!("{}", &data[0..3]);
 
-fn handle_button(bot: &BotApi, callback_query: &types::CallbackQuery, conn: &Connection) {
-    // match callback_query.data.unwrap().as_str() {
-        // "delete" => {
-        //     // Development is put on hold until I release a new version of 
-        // },
-        // "back" => {
-        //     // let edit_args = args::EditMessageText::new(&text)
-        //     //     .chat_id(msg.chat.id)
-        //     //     .message_id(msg.message_id)
-        //     //     .parse_mode("Markdown")
-        //     //     .reply_markup(&reply_markup);
-        //     //     let _ = bot.edit_message_text(&edit_args);
 
-        // },
-        // _ => {
+    match &data[0..4] {
+        "dele" => {
+            conn.execute(&format!("DELETE FROM pastes{} WHERE hash=?1", callback_query.from.id),
+                &[&&data[4..]]).unwrap(); // Add confirmation page
+            
+            conn.execute("UPDATE users
+                  SET amount=amount-1
+                  WHERE id=?1",
+                 &[&callback_query.from.id]).unwrap();
+            
+            let keyboard = get_pastes_as_buttons(callback_query.from.id, conn);
+            let _ = bot.edit_message_text(  // Make function to stop repeating this
+                &args::EditMessageText      // And make it check if you have none left
+                    ::new("Select a paste")
+                    .message_id(msg.message_id)
+                    .chat_id(msg.chat.id)
+                    .reply_markup(ReplyMarkup::new_inline_keyboard(keyboard).into())
+                    );
+        },
+        "back" => {
+            let keyboard = get_pastes_as_buttons(callback_query.from.id, conn);
+            let _ = bot.edit_message_text(
+                &args::EditMessageText
+                    ::new("Select a paste")
+                    .message_id(msg.message_id)
+                    .chat_id(msg.chat.id)
+                    .reply_markup(ReplyMarkup::new_inline_keyboard(keyboard).into())
+                    );
+
+        },
+        _ => {
             let paste = conn.query_row(
                 &format!("SELECT text,hash,uses FROM pastes{} WHERE hash=?1 ORDER BY uses",
                             callback_query.from.id),
-                &[&callback_query.data], |row| {
+                &[&data], |row| {
                     Paste {
                         text: row.get(0),
                         hash: row.get(1),
@@ -193,36 +206,34 @@ fn handle_button(bot: &BotApi, callback_query: &types::CallbackQuery, conn: &Con
                     }
                 }).unwrap();
 
-            if let Some(ref msg) = callback_query.message {
-                let text = format!("Text: {}\n\nUses: {}", paste.text, paste.uses);
-                
-                let reply_markup = ReplyMarkup::new_inline_keyboard(
+            let text = format!("Text: {}\n\nUses: {}", paste.text, paste.uses);
+            
+            let reply_markup = ReplyMarkup::new_inline_keyboard(
+                vec![
                     vec![
-                        vec![
-                            InlineKeyboardButton::new("Delete".into())
-                                .callback_data("delete".into()),
-                            InlineKeyboardButton::new("Back".into())
-                                .callback_data("back".into()),
-                        ]
+                        InlineKeyboardButton::new("Delete".into())
+                            .callback_data(format!("{}{}", "dele", &paste.hash)),
+                        InlineKeyboardButton::new("Back".into())
+                            .callback_data("back".into()),
                     ]
-                );
+                ]
+            );
 
-                let edit_args = args::EditMessageText::new(&text)
-                    .chat_id(msg.chat.id)
-                    .message_id(msg.message_id)
-                    .parse_mode("Markdown")
-                    .reply_markup(reply_markup.into());
-                let _ = bot.edit_message_text(&edit_args);
-            }
-    //     }
-    // }
+            let edit_args = args::EditMessageText::new(&text)
+                .chat_id(msg.chat.id)
+                .message_id(msg.message_id)
+                .parse_mode("Markdown")
+                .reply_markup(reply_markup.into());
+            let _ = bot.edit_message_text(&edit_args);
+        }
+    }
 }
 
 fn get_pastes_as_buttons(user_id: i64, conn: &Connection) -> Vec<Vec<InlineKeyboardButton>> {
     let query = format!("SELECT text,hash FROM pastes{} ORDER BY uses DESC LIMIT 6",
                         user_id);
     let mut stmt = conn.prepare(&query).unwrap();
-    let mut res_pastes = stmt.query_map_named(&[], |row| {
+    let res_pastes = stmt.query_map_named(&[], |row| {
         let mut text: String = row.get(0);
 
         Paste {
@@ -254,21 +265,23 @@ fn get_pastes_as_buttons(user_id: i64, conn: &Connection) -> Vec<Vec<InlineKeybo
     let mut i = 0;
     let len = pastes.len();
     while i < len {
-        let p1 = pastes.get(i).unwrap();
+        let p1 = &pastes[i];
         if i + 1 < len {
-            let p2 = pastes.get(i+1).unwrap();
+            let p2 = &pastes[i+1];
             buttons.push(vec![
                 InlineKeyboardButton::new(p1.text.clone())
                     .callback_data(p1.hash.clone()),
                 InlineKeyboardButton::new(p2.text.clone())
                     .callback_data(p2.hash.clone())
                 ]);
+            i += 1;
         } else {
             buttons.push(vec![
                 InlineKeyboardButton::new(p1.text.clone())
                     .callback_data(p1.hash.clone())
             ]);
         }
+        i += 1;
     }
 
     buttons
